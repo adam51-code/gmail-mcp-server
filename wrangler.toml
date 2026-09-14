@@ -1,0 +1,8 @@
+name = "gmail-mcp-server"
+main = "src/index.js"
+compatibility_date = "2024-09-01"
+
+# KV namespace for storing OAuth tokens
+[[kv_namespaces]]
+binding = "GMAIL_TOKENS"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
