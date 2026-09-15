@@ -1,6 +1,5 @@
 // Gmail MCP Server — Zero dependencies
 // OAuth 2.0 with auto-refresh, tokens stored in Cloudflare KV
-// Scope: gmail.modify (archive, star, label, mark read/unread, trash)
 
 const SERVER_INFO = { name: "gmail-api", version: "1.0.0" };
 const PROTOCOL_VERSION = "2024-11-05";
@@ -8,9 +7,9 @@ const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
 const KV_KEY = "gmail_oauth_tokens";
-const SCOPES = "https://www.googleapis.com/auth/gmail.modify";
+const SCOPES = "https://mail.google.com/";
 
-// ── OAuth helpers ────────────────────────────────────────────────────────────────
+// ── OAuth helpers ────────────────────────────────────────────────────
 
 async function getTokens(env) {
   const raw = await env.GMAIL_TOKENS.get(KV_KEY);
@@ -19,12 +18,10 @@ async function getTokens(env) {
 }
 
 async function saveTokens(env, tokens) {
-  const prev = await getTokens(env);
   await env.GMAIL_TOKENS.put(KV_KEY, JSON.stringify({
     access_token: tokens.access_token,
-    refresh_token: tokens.refresh_token || prev?.refresh_token,
+    refresh_token: tokens.refresh_token || (await getTokens(env))?.refresh_token,
     expires_at: Date.now() + (tokens.expires_in || 3600) * 1000 - 60000,
-    email: tokens.email || prev?.email,
   }));
 }
 
@@ -60,9 +57,9 @@ async function getAccessToken(env) {
   return await refreshAccessToken(env);
 }
 
-// ── Gmail API caller ─────────────────────────────────────────────────────────────
+// ── Gmail API caller ─────────────────────────────────────────────
 
-async function callGmail(env, method, path, body) {
+async function gmailFetch(env, method, path, body) {
   const token = await getAccessToken(env);
   const url = `${GMAIL_BASE}${path}`;
 
@@ -80,7 +77,6 @@ async function callGmail(env, method, path, body) {
 
   const text = await res.text();
   if (!res.ok) return { _error: true, status: res.status, body: text };
-  if (!text) return { success: true };
   try { return JSON.parse(text); } catch { return text; }
 }
 
@@ -93,151 +89,41 @@ function toolResult(data) {
   };
 }
 
-// ── Label resolution helper ──────────────────────────────────────────────────────
-
-async function resolveLabelId(env, labelName) {
-  const result = await callGmail(env, "GET", "/labels");
-  if (result._error) throw new Error(`Failed to list labels: ${result.body}`);
-  const label = result.labels.find(
-    l => l.name.toLowerCase() === labelName.toLowerCase() || l.id.toLowerCase() === labelName.toLowerCase()
-  );
-  if (!label) throw new Error(`Label not found: "${labelName}". Use list_labels to see available labels.`);
-  return label.id;
-}
-
-// ── Tool definitions ─────────────────────────────────────────────────────────────
+// ── Tool definitions ─────────────────────────────────────────────────
 
 const TOOLS = [
   {
-    name: "archive",
-    description: "Archive one or more messages by removing the INBOX label. Messages remain in All Mail.",
+    name: "message_spam",
+    description: "Move one or more messages to spam. Removes them from the inbox and adds the SPAM label.",
     inputSchema: {
       type: "object",
       properties: {
         messageIds: {
           type: "array",
           items: { type: "string" },
-          description: "Gmail message IDs to archive (max 100)",
+          description: "Gmail message IDs to move to spam.",
         },
       },
       required: ["messageIds"],
     },
   },
   {
-    name: "unarchive",
-    description: "Move messages back to the inbox by adding the INBOX label.",
+    name: "message_unspam",
+    description: "Remove one or more messages from spam and move them back to the inbox.",
     inputSchema: {
       type: "object",
       properties: {
         messageIds: {
           type: "array",
           items: { type: "string" },
-          description: "Gmail message IDs to move back to inbox (max 100)",
+          description: "Gmail message IDs to remove from spam.",
         },
       },
       required: ["messageIds"],
     },
   },
   {
-    name: "star",
-    description: "Star one or more messages.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        messageIds: {
-          type: "array",
-          items: { type: "string" },
-          description: "Gmail message IDs to star (max 100)",
-        },
-      },
-      required: ["messageIds"],
-    },
-  },
-  {
-    name: "unstar",
-    description: "Remove star from one or more messages.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        messageIds: {
-          type: "array",
-          items: { type: "string" },
-          description: "Gmail message IDs to unstar (max 100)",
-        },
-      },
-      required: ["messageIds"],
-    },
-  },
-  {
-    name: "mark_read",
-    description: "Mark one or more messages as read.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        messageIds: {
-          type: "array",
-          items: { type: "string" },
-          description: "Gmail message IDs to mark as read (max 100)",
-        },
-      },
-      required: ["messageIds"],
-    },
-  },
-  {
-    name: "mark_unread",
-    description: "Mark one or more messages as unread.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        messageIds: {
-          type: "array",
-          items: { type: "string" },
-          description: "Gmail message IDs to mark as unread (max 100)",
-        },
-      },
-      required: ["messageIds"],
-    },
-  },
-  {
-    name: "add_label",
-    description: "Add a label to one or more messages. Use list_labels to see available labels.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        messageIds: {
-          type: "array",
-          items: { type: "string" },
-          description: "Gmail message IDs (max 100)",
-        },
-        label: {
-          type: "string",
-          description: "Label name or ID to add",
-        },
-      },
-      required: ["messageIds", "label"],
-    },
-  },
-  {
-    name: "remove_label",
-    description: "Remove a label from one or more messages. Use list_labels to see available labels.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        messageIds: {
-          type: "array",
-          items: { type: "string" },
-          description: "Gmail message IDs (max 100)",
-        },
-        label: {
-          type: "string",
-          description: "Label name or ID to remove",
-        },
-      },
-      required: ["messageIds", "label"],
-    },
-  },
-  {
-    name: "trash",
+    name: "message_trash",
     description: "Move one or more messages to trash.",
     inputSchema: {
       type: "object",
@@ -245,155 +131,280 @@ const TOOLS = [
         messageIds: {
           type: "array",
           items: { type: "string" },
-          description: "Gmail message IDs to trash",
+          description: "Gmail message IDs to trash.",
         },
       },
       required: ["messageIds"],
     },
   },
   {
-    name: "untrash",
-    description: "Remove one or more messages from trash.",
+    name: "message_untrash",
+    description: "Remove one or more messages from trash and move them back to the inbox.",
     inputSchema: {
       type: "object",
       properties: {
         messageIds: {
           type: "array",
           items: { type: "string" },
-          description: "Gmail message IDs to untrash",
+          description: "Gmail message IDs to untrash.",
         },
       },
       required: ["messageIds"],
     },
   },
   {
-    name: "list_labels",
-    description: "List all Gmail labels (system and custom) with their IDs.",
+    name: "bulk_archive",
+    description: "Archive multiple messages at once by removing the INBOX label. Much faster than archiving one at a time.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        messageIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "Gmail message IDs to archive.",
+        },
+      },
+      required: ["messageIds"],
+    },
+  },
+  {
+    name: "bulk_modify",
+    description: "Add and/or remove labels from multiple messages in a single call. Use for bulk labeling, bulk archive, or any batch label operation.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        messageIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "Gmail message IDs to modify.",
+        },
+        addLabelIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "Label IDs to add (e.g. INBOX, UNREAD, STARRED, SPAM, TRASH, or custom label IDs).",
+        },
+        removeLabelIds: {
+          type: "array",
+          items: { type: "string" },
+          description: "Label IDs to remove.",
+        },
+      },
+      required: ["messageIds"],
+    },
+  },
+  {
+    name: "search",
+    description: "Search Gmail using native Gmail query syntax (same as the Gmail search bar). Returns message IDs and snippets. Supports operators like from:, to:, subject:, has:attachment, after:, before:, label:, is:unread, etc.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Gmail search query (e.g. 'from:upwork.com is:unread')" },
+        maxResults: { type: "number", description: "Max results to return (default 20, max 500)" },
+        pageToken: { type: "string", description: "Pagination token from a previous search result" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "labels_list",
+    description: "List all Gmail labels (system and custom). Returns label ID, name, and message counts.",
     inputSchema: { type: "object", properties: {} },
   },
   {
-    name: "mark_important",
-    description: "Mark one or more messages as important.",
+    name: "label_create",
+    description: "Create a new Gmail label.",
     inputSchema: {
       type: "object",
       properties: {
-        messageIds: {
-          type: "array",
-          items: { type: "string" },
-          description: "Gmail message IDs to mark important (max 100)",
-        },
+        name: { type: "string", description: "Name for the new label. Use '/' for nesting (e.g. 'Clients/Active')." },
       },
-      required: ["messageIds"],
+      required: ["name"],
     },
   },
   {
-    name: "mark_not_important",
-    description: "Remove the important marker from one or more messages.",
+    name: "label_delete",
+    description: "Delete a Gmail label by its ID. Does not delete the messages, just removes the label.",
     inputSchema: {
       type: "object",
       properties: {
-        messageIds: {
-          type: "array",
-          items: { type: "string" },
-          description: "Gmail message IDs (max 100)",
-        },
+        labelId: { type: "string", description: "Gmail label ID to delete." },
       },
-      required: ["messageIds"],
+      required: ["labelId"],
+    },
+  },
+  {
+    name: "label_update",
+    description: "Rename a Gmail label.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        labelId: { type: "string", description: "Gmail label ID to update." },
+        name: { type: "string", description: "New name for the label." },
+      },
+      required: ["labelId", "name"],
+    },
+  },
+  {
+    name: "thread_modify",
+    description: "Add or remove labels from an entire thread (all messages in the conversation).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        threadId: { type: "string", description: "Gmail thread ID." },
+        addLabelIds: { type: "array", items: { type: "string" }, description: "Label IDs to add." },
+        removeLabelIds: { type: "array", items: { type: "string" }, description: "Label IDs to remove." },
+      },
+      required: ["threadId"],
+    },
+  },
+  {
+    name: "thread_trash",
+    description: "Move an entire thread to trash.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        threadId: { type: "string", description: "Gmail thread ID to trash." },
+      },
+      required: ["threadId"],
+    },
+  },
+  {
+    name: "thread_untrash",
+    description: "Remove an entire thread from trash.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        threadId: { type: "string", description: "Gmail thread ID to untrash." },
+      },
+      required: ["threadId"],
     },
   },
 ];
 
-// ── Batch modify helper ──────────────────────────────────────────────────────────
-
-async function batchModify(env, messageIds, addLabelIds, removeLabelIds) {
-  if (messageIds.length === 1) {
-    const body = {};
-    if (addLabelIds?.length) body.addLabelIds = addLabelIds;
-    if (removeLabelIds?.length) body.removeLabelIds = removeLabelIds;
-    return await callGmail(env, "POST", `/messages/${messageIds[0]}/modify`, body);
-  }
-  const body = { ids: messageIds };
-  if (addLabelIds?.length) body.addLabelIds = addLabelIds;
-  if (removeLabelIds?.length) body.removeLabelIds = removeLabelIds;
-  return await callGmail(env, "POST", "/messages/batchModify", body);
-}
-
-// ── Tool handlers ────────────────────────────────────────────────────────────────
+// ── Tool handlers ────────────────────────────────────────────────────
 
 async function handleTool(env, name, args) {
   const a = args || {};
 
   switch (name) {
-    case "archive":
-      return toolResult(await batchModify(env, a.messageIds, null, ["INBOX"]));
-
-    case "unarchive":
-      return toolResult(await batchModify(env, a.messageIds, ["INBOX"], null));
-
-    case "star":
-      return toolResult(await batchModify(env, a.messageIds, ["STARRED"], null));
-
-    case "unstar":
-      return toolResult(await batchModify(env, a.messageIds, null, ["STARRED"]));
-
-    case "mark_read":
-      return toolResult(await batchModify(env, a.messageIds, null, ["UNREAD"]));
-
-    case "mark_unread":
-      return toolResult(await batchModify(env, a.messageIds, ["UNREAD"], null));
-
-    case "mark_important":
-      return toolResult(await batchModify(env, a.messageIds, ["IMPORTANT"], null));
-
-    case "mark_not_important":
-      return toolResult(await batchModify(env, a.messageIds, null, ["IMPORTANT"]));
-
-    case "add_label": {
-      const labelId = await resolveLabelId(env, a.label);
-      return toolResult(await batchModify(env, a.messageIds, [labelId], null));
-    }
-
-    case "remove_label": {
-      const labelId = await resolveLabelId(env, a.label);
-      return toolResult(await batchModify(env, a.messageIds, null, [labelId]));
-    }
-
-    case "trash": {
-      const results = [];
-      for (const id of a.messageIds) {
-        results.push(await callGmail(env, "POST", `/messages/${id}/trash`));
-      }
-      return toolResult(results.length === 1 ? results[0] : { trashed: results.length, results });
-    }
-
-    case "untrash": {
-      const results = [];
-      for (const id of a.messageIds) {
-        results.push(await callGmail(env, "POST", `/messages/${id}/untrash`));
-      }
-      return toolResult(results.length === 1 ? results[0] : { untrashed: results.length, results });
-    }
-
-    case "list_labels": {
-      const result = await callGmail(env, "GET", "/labels");
-      if (result._error) return toolResult(result);
-      const labels = result.labels.map(l => ({
-        id: l.id,
-        name: l.name,
-        type: l.type,
-        messagesTotal: l.messagesTotal,
-        messagesUnread: l.messagesUnread,
+    case "message_spam":
+      return toolResult(await gmailFetch(env, "POST", "/messages/batchModify", {
+        ids: a.messageIds,
+        addLabelIds: ["SPAM"],
+        removeLabelIds: ["INBOX"],
       }));
-      labels.sort((a, b) => a.name.localeCompare(b.name));
-      return toolResult(labels);
+
+    case "message_unspam":
+      return toolResult(await gmailFetch(env, "POST", "/messages/batchModify", {
+        ids: a.messageIds,
+        addLabelIds: ["INBOX"],
+        removeLabelIds: ["SPAM"],
+      }));
+
+    case "message_trash": {
+      const results = [];
+      for (const id of a.messageIds) {
+        results.push(await gmailFetch(env, "POST", `/messages/${id}/trash`));
+      }
+      return toolResult({ trashed: a.messageIds.length, results });
     }
+
+    case "message_untrash": {
+      const results = [];
+      for (const id of a.messageIds) {
+        results.push(await gmailFetch(env, "POST", `/messages/${id}/untrash`));
+      }
+      return toolResult({ untrashed: a.messageIds.length, results });
+    }
+
+    case "bulk_archive":
+      return toolResult(await gmailFetch(env, "POST", "/messages/batchModify", {
+        ids: a.messageIds,
+        removeLabelIds: ["INBOX"],
+      }));
+
+    case "bulk_modify":
+      return toolResult(await gmailFetch(env, "POST", "/messages/batchModify", {
+        ids: a.messageIds,
+        addLabelIds: a.addLabelIds || [],
+        removeLabelIds: a.removeLabelIds || [],
+      }));
+
+    case "search": {
+      const max = Math.min(a.maxResults || 20, 500);
+      let path = `/messages?q=${encodeURIComponent(a.query)}&maxResults=${max}`;
+      if (a.pageToken) path += `&pageToken=${encodeURIComponent(a.pageToken)}`;
+
+      const list = await gmailFetch(env, "GET", path);
+      if (list._error) return toolResult(list);
+
+      // Fetch snippet + labels for each message
+      const messages = list.messages || [];
+      const detailed = [];
+      for (const msg of messages.slice(0, 25)) {
+        const detail = await gmailFetch(env, "GET",
+          `/messages/${msg.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`
+        );
+        if (!detail._error) {
+          const headers = {};
+          for (const h of detail.payload?.headers || []) {
+            headers[h.name.toLowerCase()] = h.value;
+          }
+          detailed.push({
+            id: detail.id,
+            threadId: detail.threadId,
+            snippet: detail.snippet,
+            from: headers.from,
+            subject: headers.subject,
+            date: headers.date,
+            labelIds: detail.labelIds,
+          });
+        }
+      }
+
+      return toolResult({
+        resultSizeEstimate: list.resultSizeEstimate,
+        nextPageToken: list.nextPageToken || null,
+        messages: detailed,
+      });
+    }
+
+    case "labels_list":
+      return toolResult(await gmailFetch(env, "GET", "/labels"));
+
+    case "label_create":
+      return toolResult(await gmailFetch(env, "POST", "/labels", {
+        name: a.name,
+        labelListVisibility: "labelShow",
+        messageListVisibility: "show",
+      }));
+
+    case "label_delete":
+      return toolResult(await gmailFetch(env, "DELETE", `/labels/${a.labelId}`));
+
+    case "label_update":
+      return toolResult(await gmailFetch(env, "PATCH", `/labels/${a.labelId}`, {
+        name: a.name,
+      }));
+
+    case "thread_modify":
+      return toolResult(await gmailFetch(env, "POST", `/threads/${a.threadId}/modify`, {
+        addLabelIds: a.addLabelIds || [],
+        removeLabelIds: a.removeLabelIds || [],
+      }));
+
+    case "thread_trash":
+      return toolResult(await gmailFetch(env, "POST", `/threads/${a.threadId}/trash`));
+
+    case "thread_untrash":
+      return toolResult(await gmailFetch(env, "POST", `/threads/${a.threadId}/untrash`));
 
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
 }
 
-// ── MCP Protocol ─────────────────────────────────────────────────────────────────
+// ── MCP Protocol ─────────────────────────────────────────────────────
 
 function jsonrpc(id, result) {
   return { jsonrpc: "2.0", id, result };
@@ -442,35 +453,21 @@ async function handleRpc(env, req) {
   }
 }
 
-// ── OAuth flow endpoints ───────────────────────────────────────────────────────
+// ── OAuth flow endpoints ─────────────────────────────────────────────
 
 function handleAuth(env, url) {
   const redirectUri = `${url.origin}/callback`;
-  const params = new URLSearchParams({
-    client_id: env.GOOGLE_CLIENT_ID,
-    redirect_uri: redirectUri,
-    response_type: "code",
-    scope: SCOPES,
-    access_type: "offline",
-    prompt: "consent",
-  });
-  return Response.redirect(`${AUTH_URL}?${params}`, 302);
+  const authUrl = `${AUTH_URL}?client_id=${env.GOOGLE_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${encodeURIComponent(SCOPES)}&access_type=offline&prompt=consent`;
+  return Response.redirect(authUrl, 302);
 }
 
 async function handleCallback(env, url) {
   const code = url.searchParams.get("code");
-  const error = url.searchParams.get("error");
-
-  if (error) {
-    return new Response(`OAuth error: ${error}`, { status: 400 });
-  }
-
   if (!code) {
     return new Response("Missing authorization code", { status: 400 });
   }
 
   const redirectUri = `${url.origin}/callback`;
-
   const res = await fetch(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -491,33 +488,16 @@ async function handleCallback(env, url) {
   const tokens = await res.json();
   await saveTokens(env, tokens);
 
-  // Fetch the user's email for display
-  let email = "unknown";
-  try {
-    const profile = await fetch(`${GMAIL_BASE}/profile`, {
-      headers: { Authorization: `Bearer ${tokens.access_token}` },
-    });
-    if (profile.ok) {
-      const p = await profile.json();
-      email = p.emailAddress;
-      const current = await getTokens(env);
-      current.email = email;
-      await env.GMAIL_TOKENS.put(KV_KEY, JSON.stringify(current));
-    }
-  } catch {}
-
   return new Response(
     `<html><body style="font-family:sans-serif;text-align:center;padding:60px">
       <h1>Connected to Gmail!</h1>
-      <p>Account: ${email}</p>
-      <p>Scope: gmail.modify (archive, star, label, read/unread, trash)</p>
-      <p>You can close this window. Brain now has Gmail modify access.</p>
+      <p>Brain now has full Gmail access. You can close this window.</p>
     </body></html>`,
     { headers: { "Content-Type": "text/html" } }
   );
 }
 
-// ── Worker entry ─────────────────────────────────────────────────────────────────
+// ── Worker entry ─────────────────────────────────────────────────────
 
 export default {
   async fetch(request, env) {
@@ -529,7 +509,6 @@ export default {
         status: "ok",
         tools: TOOLS.length,
         gmail_connected: !!tokens?.refresh_token,
-        email: tokens?.email || null,
       });
     }
 
@@ -539,21 +518,6 @@ export default {
 
     if (url.pathname === "/callback") {
       return await handleCallback(env, url);
-    }
-
-    if (url.pathname === "/status") {
-      if (env.MCP_AUTH_TOKEN) {
-        const auth = request.headers.get("Authorization");
-        if (auth !== `Bearer ${env.MCP_AUTH_TOKEN}`) {
-          return new Response("Unauthorized", { status: 401 });
-        }
-      }
-      const tokens = await getTokens(env);
-      return Response.json({
-        connected: !!tokens?.refresh_token,
-        email: tokens?.email,
-        token_expires_at: tokens?.expires_at ? new Date(tokens.expires_at).toISOString() : null,
-      });
     }
 
     if (request.method === "OPTIONS") {
