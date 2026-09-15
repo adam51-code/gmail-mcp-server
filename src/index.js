@@ -1,7 +1,7 @@
 // Gmail MCP Server — Zero dependencies
 // OAuth 2.0 with auto-refresh, tokens stored in Cloudflare KV
 
-const SERVER_INFO = { name: "gmail-api", version: "1.0.0" };
+const SERVER_INFO = { name: "gmail-api", version: "1.1.0" };
 const PROTOCOL_VERSION = "2024-11-05";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -279,6 +279,40 @@ const TOOLS = [
       required: ["threadId"],
     },
   },
+  {
+    name: "filter_list",
+    description: "List all Gmail filters (auto-processing rules). Returns each filter's criteria (from, to, subject, query, etc.) and actions (archive, label, star, trash, etc.). Use this to audit existing inbox automation.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "filter_create",
+    description: "Create a Gmail filter that automatically processes incoming messages matching criteria. Supports matching by from, to, subject, query (full Gmail search syntax), hasAttachment, and negatedQuery. Actions include addLabelIds, removeLabelIds (use 'INBOX' to auto-archive, 'UNREAD' to auto-mark-read, 'SPAM' to auto-spam), forward, star, and markImportant. Filters apply to all future messages matching the criteria.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        from: { type: "string", description: "Match sender email or domain (e.g. 'donotreply@upwork.com' or '@upwork.com')." },
+        to: { type: "string", description: "Match recipient email." },
+        subject: { type: "string", description: "Match subject text." },
+        query: { type: "string", description: "Match using full Gmail search syntax (e.g. 'from:paypal.com subject:receipt')." },
+        negatedQuery: { type: "string", description: "Exclude messages matching this Gmail search query." },
+        hasAttachment: { type: "boolean", description: "Only match messages with attachments." },
+        addLabelIds: { type: "array", items: { type: "string" }, description: "Label IDs to add to matching messages. Use system labels like STARRED, IMPORTANT, TRASH, SPAM, or custom label IDs." },
+        removeLabelIds: { type: "array", items: { type: "string" }, description: "Label IDs to remove. Use 'INBOX' to auto-archive, 'UNREAD' to auto-mark-read." },
+        forward: { type: "string", description: "Email address to forward matching messages to." },
+      },
+    },
+  },
+  {
+    name: "filter_delete",
+    description: "Delete a Gmail filter by its ID. Does not affect messages already processed by the filter.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        filterId: { type: "string", description: "Gmail filter ID to delete (from filter_list results)." },
+      },
+      required: ["filterId"],
+    },
+  },
 ];
 
 // ── Tool handlers ────────────────────────────────────────────────────
@@ -338,7 +372,6 @@ async function handleTool(env, name, args) {
       const list = await gmailFetch(env, "GET", path);
       if (list._error) return toolResult(list);
 
-      // Fetch snippet + labels for each message
       const messages = list.messages || [];
       const detailed = [];
       for (const msg of messages.slice(0, 25)) {
@@ -398,6 +431,41 @@ async function handleTool(env, name, args) {
 
     case "thread_untrash":
       return toolResult(await gmailFetch(env, "POST", `/threads/${a.threadId}/untrash`));
+
+    case "filter_list": {
+      const res = await gmailFetch(env, "GET", "/settings/filters");
+      if (res._error) return toolResult(res);
+      const filters = res.filter || [];
+      const summary = filters.map(f => ({
+        id: f.id,
+        criteria: f.criteria,
+        actions: f.action,
+      }));
+      return toolResult({ count: summary.length, filters: summary });
+    }
+
+    case "filter_create": {
+      const criteria = {};
+      if (a.from) criteria.from = a.from;
+      if (a.to) criteria.to = a.to;
+      if (a.subject) criteria.subject = a.subject;
+      if (a.query) criteria.query = a.query;
+      if (a.negatedQuery) criteria.negatedQuery = a.negatedQuery;
+      if (a.hasAttachment !== undefined) criteria.hasAttachment = a.hasAttachment;
+
+      const action = {};
+      if (a.addLabelIds) action.addLabelIds = a.addLabelIds;
+      if (a.removeLabelIds) action.removeLabelIds = a.removeLabelIds;
+      if (a.forward) action.forward = a.forward;
+
+      return toolResult(await gmailFetch(env, "POST", "/settings/filters", {
+        criteria,
+        action,
+      }));
+    }
+
+    case "filter_delete":
+      return toolResult(await gmailFetch(env, "DELETE", `/settings/filters/${a.filterId}`));
 
     default:
       throw new Error(`Unknown tool: ${name}`);
