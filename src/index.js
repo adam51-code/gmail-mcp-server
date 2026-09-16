@@ -1,13 +1,13 @@
 // Gmail MCP Server — Zero dependencies
 // OAuth 2.0 with auto-refresh, tokens stored in Cloudflare KV
 
-const SERVER_INFO = { name: "gmail-api", version: "1.2.0" };
+const SERVER_INFO = { name: "gmail-api", version: "1.3.0" };
 const PROTOCOL_VERSION = "2024-11-05";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
 const KV_KEY = "gmail_oauth_tokens";
-const SCOPES = "https://mail.google.com/";
+const SCOPES = "https://mail.google.com/ https://www.googleapis.com/auth/gmail.settings.basic";
 
 // ── OAuth helpers ────────────────────────────────────────────────────
 
