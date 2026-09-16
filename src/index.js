@@ -1,7 +1,7 @@
 // Gmail MCP Server — Zero dependencies
 // OAuth 2.0 with auto-refresh, tokens stored in Cloudflare KV
 
-const SERVER_INFO = { name: "gmail-api", version: "1.3.0" };
+const SERVER_INFO = { name: "gmail-api", version: "1.3.1" };
 const PROTOCOL_VERSION = "2024-11-05";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -87,6 +87,51 @@ function toolResult(data) {
       text: typeof data === "string" ? data : JSON.stringify(data, null, 2),
     }],
   };
+}
+
+// ── Nuke filters (temporary) ──────────────────────────────────────
+// DELETE THIS AFTER USE. One-time cleanup of 5,350 legacy filters.
+
+async function nukeAllFilters(env) {
+  const token = await getAccessToken(env);
+  const base = `${GMAIL_BASE}/settings/filters`;
+
+  // Step 1: list all filters
+  const listRes = await fetch(base, {
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+  });
+  if (!listRes.ok) {
+    const err = await listRes.text();
+    return { error: `Failed to list filters: ${err}` };
+  }
+  const data = await listRes.json();
+  const filters = data.filter || [];
+  const total = filters.length;
+
+  if (total === 0) return { deleted: 0, total: 0, message: "No filters to delete." };
+
+  // Step 2: delete in concurrent batches of 20
+  let deleted = 0;
+  let errors = 0;
+  const batchSize = 20;
+
+  for (let i = 0; i < filters.length; i += batchSize) {
+    const batch = filters.slice(i, i + batchSize);
+    const results = await Promise.allSettled(
+      batch.map(f =>
+        fetch(`${base}/${f.id}`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        })
+      )
+    );
+    for (const r of results) {
+      if (r.status === "fulfilled" && r.value.ok) deleted++;
+      else errors++;
+    }
+  }
+
+  return { deleted, errors, total, message: `Nuked ${deleted} of ${total} filters.` };
 }
 
 // ── Tool definitions ─────────────────────────────────────────────────
@@ -589,6 +634,18 @@ export default {
 
     if (url.pathname === "/callback") {
       return await handleCallback(env, url);
+    }
+
+    // TEMPORARY: nuke all filters endpoint. Remove after use.
+    if (url.pathname === "/nuke-filters" && request.method === "POST") {
+      if (env.MCP_AUTH_TOKEN) {
+        const auth = request.headers.get("Authorization");
+        if (auth !== `Bearer ${env.MCP_AUTH_TOKEN}`) {
+          return new Response("Unauthorized", { status: 401 });
+        }
+      }
+      const result = await nukeAllFilters(env);
+      return Response.json(result);
     }
 
     if (request.method === "OPTIONS") {
