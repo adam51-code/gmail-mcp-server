@@ -1,4 +1,4 @@
-const SERVER_INFO = { name: "gmail-api", version: "1.4.2" };
+const SERVER_INFO = { name: "gmail-api", version: "1.4.3" };
 const PROTOCOL_VERSION = "2024-11-05";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -65,7 +65,7 @@ function schema(properties, required = []) {
 
 const ids = { type: "array", items: { type: "string" } };
 const TOOLS = [
-  { name: "nuke_filters", description: "Permanently delete every Gmail filter. Does not delete email or labels. Use only after explicit user confirmation.", inputSchema: schema({}) },
+  { name: "nuke_filters", description: "Delete up to 200 Gmail filters per call. Call repeatedly until remaining is 0. Does not delete email or labels. Use only after explicit user confirmation.", inputSchema: schema({}) },
   { name: "message_spam", description: "Move messages to spam.", inputSchema: schema({ messageIds: ids }, ["messageIds"]) },
   { name: "message_unspam", description: "Remove messages from spam.", inputSchema: schema({ messageIds: ids }, ["messageIds"]) },
   { name: "message_trash", description: "Move messages to trash.", inputSchema: schema({ messageIds: ids }, ["messageIds"]) },
@@ -85,17 +85,22 @@ const TOOLS = [
   { name: "thread_untrash", description: "Untrash a thread.", inputSchema: schema({ threadId: { type: "string" } }, ["threadId"]) },
 ];
 
+const NUKE_BATCH = 200;
+
 async function nukeFilters(env) {
   const token = await getAccessToken(env);
   const base = `${GMAIL_BASE}/settings/filters`;
   const listed = await fetch(base, { headers: { Authorization: `Bearer ${token}`, Accept: "application/json" } });
   if (!listed.ok) return { error: `Failed to list filters: ${await listed.text()}` };
-  const filters = (await listed.json()).filter || [];
+  const allFilters = (await listed.json()).filter || [];
+  const total = allFilters.length;
+  if (total === 0) return { deleted: 0, errors: 0, total: 0, remaining: 0, message: "No filters to delete." };
+  const batch = allFilters.slice(0, NUKE_BATCH);
   let deleted = 0;
   let errors = 0;
-  for (let i = 0; i < filters.length; i += 20) {
-    const batch = filters.slice(i, i + 20);
-    const responses = await Promise.allSettled(batch.map((filter) => fetch(`${base}/${filter.id}`, {
+  for (let i = 0; i < batch.length; i += 20) {
+    const chunk = batch.slice(i, i + 20);
+    const responses = await Promise.allSettled(chunk.map((filter) => fetch(`${base}/${filter.id}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${token}` },
     })));
@@ -104,7 +109,8 @@ async function nukeFilters(env) {
       else errors++;
     }
   }
-  return { deleted, errors, total: filters.length, message: `Deleted ${deleted} of ${filters.length} Gmail filters.` };
+  const remaining = total - deleted;
+  return { deleted, errors, total, remaining, message: `Deleted ${deleted} of ${total}. ${remaining} remaining.` };
 }
 
 async function handleTool(env, name, args = {}) {
